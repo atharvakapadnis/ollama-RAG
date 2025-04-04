@@ -24,6 +24,14 @@ if add_documents:
         ids.append(str(i))
         documents.append(document)
 
+def doc_batches(vector_store, documents, ids, batch_size=5000):
+    for i in range(0, len(documents), batch_size):
+        batch_docs = documents[i:i+batch_size]
+        batch_ids = ids[i:i+batch_size]
+        print(f"Adding batch {i//batch_size + 1}/{(len(documents)-1)//batch_size+1} with {len(batch_docs)} documents")
+        vector_store.add_documents(documents=batch_docs, ids=batch_ids)
+    return vector_store
+
 vector_store = Chroma(
     collection_name = "waterworks_reviews",
     persist_directory = db_location,
@@ -31,8 +39,8 @@ vector_store = Chroma(
 )
 
 if add_documents:
-    vector_store.add_documents(documents = documents, ids = ids)
+    doc_batches(vector_store, documents=documents, ids=ids)
 
-retriever = vector_store.as_restriever(
-    search_kwargs={"k":50}
+retriever = vector_store.as_retriever(
+    search_kwargs={"k":1000}
 )
