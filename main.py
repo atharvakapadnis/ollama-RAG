@@ -6,14 +6,22 @@ from vector import vector_store
 model = OllamaLLM(model="llama3.2")
 
 # Setup Retriever function
-retriever = vector_store.as_retriever(search_kwargs={
-    "k": 50,
-    "filter": {"source": {"$in": ["internal_docs", "product_docs"]}}
-})
+retriever = vector_store.as_retriever(
+    search_kwargs={
+        "k": 50,
+        "filter": {"source": {"$in": ["internal_docs", "product_docs", "reviews"]}},
+    }
+)
 
 # Define template for context handling
 template = """
 You are an expert assistant specialized in a Water Works Supply Chain business. Your role is to provide clear, detailed, and accurate answers based on the information provided.
+
+### Important Instruction:
+- For questions about company policies, procedures, or internal operations, ALWAYS check the internal documents first.
+- For HR-related questions including leave policies, benefits, career progression, etc., focus on HR_policies_compact.pdf and other internal documents.
+- For product-related questions, use both product documentation and customer reviews.
+- If the question mentions a specific document type, prioritize searching for information in those documents.
 
 ### SKU Identifier Mapping:
 Each SKU identifier from customer reviews exactly matches the following products in the product documentation:
@@ -28,8 +36,6 @@ Each SKU identifier from customer reviews exactly matches the following products
 - SKU-8: RainSaver Barrel  
 - SKU-9: ThermoFlow Heater  
 - SKU-10: PureWell Faucet  
-
-Use this mapping when referencing SKU identifiers from reviews and documentation.
 
 ### Instructions for Answering:
 - Clearly differentiate whether your answer is based on Internal Company Documents, Product Documentation, or Customer Reviews.
@@ -49,9 +55,10 @@ Use this mapping when referencing SKU identifiers from reviews and documentation
 prompt = ChatPromptTemplate.from_template(template)
 chain = prompt | model
 
+
 # Format context clearly for the model
 def format_context(docs):
-    formatted_context = "" 
+    formatted_context = ""
     for doc in docs:
         source = doc.metadata.get("source", "unknown")
         filename = doc.metadata.get("filename", "")
@@ -59,10 +66,13 @@ def format_context(docs):
         sku = doc.metadata.get("SKU", "")
 
         if source in ["internal_docs", "product_docs"]:
-            formatted_context += f"\n [{source}/{filename}]: {doc.page_content[:500]}...\n"
+            formatted_context += f"\n [{source}/{filename}]: {doc.page_content}\n"
         elif source == "reviews":
-            formatted_context += f"\n [Review | SKU: {sku} | Rating: {rating}]: {doc.page_content}\n"
+            formatted_context += (
+                f"\n [Review | SKU: {sku} | Rating: {rating}]: {doc.page_content}\n"
+            )
     return formatted_context
+
 
 # Main interaction loop
 if __name__ == "__main__":
