@@ -47,47 +47,6 @@ def reset_create_db():
         return True
 
 
-embeddings = OllamaEmbeddings(model="mxbai-embed-large")
-
-if not os.path.exists(db_location):
-    os.makedirs(db_location)
-
-try:
-    # Try to load existing vector store
-    vector_store = Chroma(
-        collection_name="waterworks_documents",
-        persist_directory=db_location,
-        embedding_function=embeddings,
-    )
-
-    # Check if we need to populate it
-    add_documents = reset_create_db()
-except Exception as e:
-    print(f"Error initializing vector store: {str(e)}. Will rebuild.")
-    import shutil
-
-    try:
-        if os.path.exists(db_location):
-            shutil.rmtree(db_location)
-            os.makedirs(db_location)
-    except:
-        print(f"Couldn't reset {db_location}. Please check permissions.")
-
-    # Create a new vector store
-    vector_store = Chroma(
-        collection_name="waterworks_documents",
-        persist_directory=db_location,
-        embedding_function=embeddings,
-    )
-    add_documents = True
-
-vector_store = Chroma(
-    collection_name="waterworks_documents",
-    persist_directory=db_location,
-    embedding_function=embeddings,
-)
-
-
 # Function to extract text from PDF using PyPDF2
 def pdf_text(pdf_path):
     try:
@@ -108,16 +67,74 @@ def pdf_text(pdf_path):
         return f"Error extracting text: {str(e)}"
 
 
-def chunk_text(text, metadata, chunk_size=1000, chunk_overlap=200):
+def chunk_text(text, metadata, chunk_size=10000, chunk_overlap=500):
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", ". ", " ", ""]
+        separators=["\n\n", "\n", ". ", " ", ""],
     )
 
     chunks = text_splitter.create_documents(texts=[text], metadatas=[metadata])
     return chunks
 
+
+embeddings = OllamaEmbeddings(model="mxbai-embed-large")
+
+if not os.path.exists(db_location):
+    os.makedirs(db_location)
+
+
+def check_document_exists(folder, filename, existing_ids):
+    """Check if a document already exists in the vector store"""
+    base_id = f"{folder}_{filename}"
+    return any(doc_id.startswith(base_id) for doc_id in existing_ids)
+
+
+try:
+    # Try to load existing vector store
+    vector_store = Chroma(
+        collection_name="waterworks_documents",
+        persist_directory=db_location,
+        embedding_function=embeddings,
+    )
+
+    # Get existing document IDs to check for duplicates
+    try:
+        existing_docs = vector_store.get()
+        existing_ids = existing_docs.get("ids", []) if existing_docs else []
+
+        if len(existing_ids) > 0:
+            print(
+                f"Vector store contains {len(existing_ids)} documents. Checking for rebuild..."
+            )
+            add_documents = False
+        else:
+            print("Vector store exists but is empty. Will populate.")
+            add_documents = True
+    except Exception as e:
+        print(f"Error getting existing documents: {str(e)}")
+        existing_ids = []
+        add_documents = True
+
+except Exception as e:
+    print(f"Error initializing vector store: {str(e)}. Will rebuild.")
+    import shutil
+
+    try:
+        if os.path.exists(db_location):
+            shutil.rmtree(db_location)
+            os.makedirs(db_location)
+    except:
+        print(f"Couldn't reset {db_location}. Please check permissions.")
+
+    # Create a new vector store
+    vector_store = Chroma(
+        collection_name="waterworks_documents",
+        persist_directory=db_location,
+        embedding_function=embeddings,
+    )
+    existing_ids = []
+    add_documents = True
 
 # Populate documents
 if add_documents:
@@ -128,6 +145,12 @@ if add_documents:
         for file in os.listdir(folder):
             if file.lower().endswith(".pdf"):
                 path = os.path.join(folder, file)
+
+                # Skip if document already exists in vector store
+                if check_document_exists(folder, file, existing_ids):
+                    print(f"Skipping {path} - already exists in vector store")
+                    continue
+
                 content = pdf_text(path)
                 metadata = {"source": folder, "filename": file}
 
@@ -151,24 +174,33 @@ if add_documents:
         "SKU-10": "PureWell Faucet",
     }
 
-    # Updated CSV ingestion
-    df = pd.read_csv("customer_reviews/customer_reviews.csv")
-    for idx, row in df.iterrows():
-        sku = row["SKU"]
-        product_name = sku_mapping.get(sku, "Unknown Product")
-        review_doc = Document(
-            page_content=f"{product_name} ({sku}) - {row['Review_Text']}",
-            metadata={
-                "source": "reviews",
-                "SKU": sku,
-                "product_name": product_name,
-                "rating": row["Rating"],
-                "date": row["Date"],
-                "customer_ID": row["Customer_ID"],
-            },
-        )
-        documents.append(review_doc)
-        ids.append(f"review_{idx}")
+    # Check if reviews already exist
+    has_reviews = any("reviews" in id for id in existing_ids)
+
+    if not has_reviews:
+        # Updated CSV ingestion
+        try:
+            df = pd.read_csv("customer_reviews/customer_reviews.csv")
+            for idx, row in df.iterrows():
+                sku = row["SKU"]
+                product_name = sku_mapping.get(sku, "Unknown Product")
+                review_doc = Document(
+                    page_content=f"{product_name} ({sku}) - {row['Review_Text']}",
+                    metadata={
+                        "source": "reviews",
+                        "SKU": sku,
+                        "product_name": product_name,
+                        "rating": row["Rating"],
+                        "date": row["Date"],
+                        "customer_ID": row["Customer_ID"],
+                    },
+                )
+                documents.append(review_doc)
+                ids.append(f"review_{idx}")
+        except Exception as e:
+            print(f"Error processing CSV: {str(e)}")
+    else:
+        print("Reviews already exist in vector store. Skipping CSV ingestion.")
 
     # Add documents to Chroma in batches
     batch_size = 100
@@ -179,6 +211,46 @@ if add_documents:
         )
 
 print("Chroma DB setup complete.")
+
+
+def inspect_document_content():
+    """Verify the content of specific documents"""
+    try:
+        # Try to get HR policy documents - fixed query syntax
+        hr_docs = vector_store.get(
+            where={"filename": {"$eq": "hr_policies_compact.pdf"}}
+        )
+        if "ids" in hr_docs and hr_docs["ids"]:
+            print(f"Found {len(hr_docs['ids'])} HR policy documents")
+            for i, doc_id in enumerate(hr_docs["ids"]):
+                if i < 2:  # Show first 2 for brevity
+                    print(f"\nHR Doc {i+1} (First 300 chars):")
+                    print(hr_docs["documents"][i][:300])
+        else:
+            print("No HR policy documents found")
+
+        # Search by direct match instead of contains
+        leave_files = vector_store.get()
+        leave_docs = [
+            (i, doc, meta)
+            for i, (doc, meta) in enumerate(
+                zip(leave_files["documents"], leave_files["metadatas"])
+            )
+            if "leave policy" in doc.lower()
+            or "annual leave" in doc.lower()
+            or "vacation" in doc.lower()
+        ]
+
+        if leave_docs:
+            print(f"\nFound {len(leave_docs)} documents mentioning leave/vacation")
+            for i, doc, meta in leave_docs[:2]:  # Show first 2 for brevity
+                print(f"\nLeave Doc {i+1} (First 300 chars):")
+                print(doc[:300])
+                print(f"Source: {meta.get('source')}, Filename: {meta.get('filename')}")
+        else:
+            print("\nNo documents mentioning leave policy found")
+    except Exception as e:
+        print(f"Error inspecting documents: {str(e)}")
 
 
 def debug_vector_store():
@@ -247,4 +319,8 @@ def debug_vector_store():
         print(f"Error checking product docs: {str(e)}")
 
 
+# Debug the vector store
 debug_vector_store()
+
+# Inspect document content
+inspect_document_content()
